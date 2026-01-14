@@ -172,6 +172,82 @@ class MemoryStore:
         except Exception as e:
             logger.error(f"Failed to clear session: {e}")
             return False
+    
+    def get_session_summary(self, session_id: str) -> Dict[str, Any]:
+        """
+        Get a summary of all facts stored for a session.
+        
+        Args:
+            session_id: The interview session ID
+            
+        Returns:
+            Summary dictionary with categorized facts
+        """
+        if not self._initialized:
+            return {"total_facts": 0, "skills": [], "technologies": []}
+        
+        try:
+            results = self.collection.get(
+                where={"session_id": session_id}
+            )
+            
+            summary = {
+                "total_facts": 0,
+                "skills": [],
+                "technologies": [],
+                "facts_by_phase": {}
+            }
+            
+            if results and results['ids']:
+                summary["total_facts"] = len(results['ids'])
+                
+                for i, metadata in enumerate(results['metadatas'] or []):
+                    fact_type = metadata.get('fact_type', 'general')
+                    phase = metadata.get('phase', 'unknown')
+                    
+                    # Count by phase
+                    if phase not in summary["facts_by_phase"]:
+                        summary["facts_by_phase"][phase] = 0
+                    summary["facts_by_phase"][phase] += 1
+                    
+                    # Extract skills and technologies from documents
+                    if results['documents'] and i < len(results['documents']):
+                        doc = results['documents'][i]
+                        if fact_type == 'skill':
+                            summary["skills"].append(doc)
+                        elif fact_type == 'technology':
+                            summary["technologies"].append(doc)
+            
+            # Remove duplicates
+            summary["skills"] = list(set(summary["skills"]))
+            summary["technologies"] = list(set(summary["technologies"]))
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Failed to get session summary: {e}")
+            return {"total_facts": 0, "skills": [], "technologies": []}
+    
+    def get_collection_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about the vector database collection.
+        
+        Returns:
+            Stats dictionary
+        """
+        if not self._initialized:
+            return {"initialized": False, "count": 0}
+        
+        try:
+            count = self.collection.count()
+            return {
+                "initialized": True,
+                "count": count,
+                "name": "interview_facts"
+            }
+        except Exception as e:
+            logger.error(f"Failed to get collection stats: {e}")
+            return {"initialized": True, "count": 0, "error": str(e)}
 
 
 # Global instance

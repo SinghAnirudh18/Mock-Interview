@@ -1,16 +1,15 @@
 """
-LLM Client wrapper for llama.cpp REST API.
-Handles communication with local LLM server, response cleaning, and retries.
+LLM Client using OpenRouter API.
+OpenRouter provides unified access to many models including Claude, GPT-4, Gemini, etc.
+
+Set OPENROUTER_API_KEY environment variable or pass directly.
 """
+import os
 import json
-import time
-import requests
 import logging
+import re
 from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass
-
-from utils.config import config
-from utils.cleaning import ResponseCleaner
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -26,129 +25,119 @@ class LLMResponse:
     tokens_used: int = 0
 
 
-class LLMClient:
+class GeminiClient:
     """
-    Client for interacting with llama.cpp /completion endpoint.
-    Handles DeepSeek/LLaMA models with chain-of-thought cleaning.
+    Client for OpenRouter API.
+    Provides access to many models with a unified interface.
     """
     
-    def __init__(self, base_url: Optional[str] = None):
-        self.base_url = base_url or config.llm.base_url
-        self.completion_url = f"{self.base_url}/completion"
-        self.timeout = config.llm.timeout
-        self.max_retries = config.llm.max_retries
-        logger.info(f"LLM Client initialized: {self.completion_url} (timeout={self.timeout}s)")
+    def __init__(self, api_key: Optional[str] = None):
+        # Use provided key, or env var, or hardcoded fallback
+        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY") or "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"
+        
+        # OpenRouter API settings
+        self.base_url = "https://openrouter.ai/api/v1"
+        self.model = "google/gemini-2.0-flash-001"  # Good balance of speed and quality
+        
+        logger.info(f"OpenRouter Client initialized with model: {self.model}")
     
-    def _make_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Make HTTP request to LLM server with retries."""
-        last_error = None
+    def _make_request(self, prompt: str, max_tokens: int = 200, temperature: float = 0.7) -> Dict[str, Any]:
+        """Make request to OpenRouter API."""
+        import requests
         
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = requests.post(
-                    self.completion_url,
-                    json=payload,
-                    timeout=self.timeout
-                )
-                response.raise_for_status()
-                return response.json()
-            except requests.exceptions.Timeout as e:
-                last_error = e
-                if attempt < self.max_retries:
-                    time.sleep(1 * (attempt + 1))  # Exponential backoff
-            except requests.exceptions.RequestException as e:
-                last_error = e
-                if attempt < self.max_retries:
-                    time.sleep(0.5 * (attempt + 1))
+        url = f"{self.base_url}/chat/completions"
         
-        raise ConnectionError(f"Failed to connect to LLM server after {self.max_retries + 1} attempts: {last_error}")
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost:8000",  # Required by OpenRouter
+            "X-Title": "AI Interviewer"  # Optional - shows in OpenRouter dashboard
+        }
+        
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"OpenRouter API error: {e}")
+            return {"error": str(e)}
     
     def generate(
         self,
         prompt: str,
         max_tokens: int = 200,
-        temperature: float = None,
-        top_p: float = None,
-        repeat_penalty: float = None,
-        stop_sequences: Optional[list] = None,
-        grammar: Optional[str] = None,
+        temperature: float = 0.7,
+        **kwargs  # Accept but ignore extra params for compatibility
     ) -> LLMResponse:
-        """
-        Generate completion from LLM.
+        """Generate completion from OpenRouter."""
+        response = self._make_request(prompt, max_tokens, temperature)
         
-        Args:
-            prompt: The input prompt
-            max_tokens: Maximum tokens to generate (n_predict)
-            temperature: Sampling temperature (None uses default)
-            top_p: Top-p sampling (None uses default)
-            repeat_penalty: Repetition penalty (None uses default)
-            stop_sequences: List of strings that stop generation
-            grammar: Optional grammar constraint
-            
-        Returns:
-            LLMResponse with cleaned content
-        """
-        payload = {
-            "prompt": prompt,
-            "n_predict": max_tokens,
-            "temperature": temperature or config.llm.default_temperature,
-            "top_p": top_p or config.llm.default_top_p,
-            "repeat_penalty": repeat_penalty or config.llm.default_repeat_penalty,
-        }
-        
-        if stop_sequences:
-            payload["stop"] = stop_sequences
-        
-        if grammar:
-            payload["grammar"] = grammar
+        if "error" in response:
+            return LLMResponse(
+                content="",
+                is_valid=False,
+                raw_response=response,
+                tokens_used=0
+            )
         
         try:
-            response = self._make_request(payload)
-            content = response.get("content", "")
-            tokens = response.get("tokens_predicted", 0)
+            content = response["choices"][0]["message"]["content"]
+            tokens = response.get("usage", {}).get("total_tokens", 0)
             
             return LLMResponse(
-                content=content,
+                content=content.strip(),
                 is_valid=bool(content.strip()),
                 raw_response=response,
                 tokens_used=tokens
             )
-        except Exception as e:
+        except (KeyError, IndexError) as e:
+            logger.error(f"Failed to parse OpenRouter response: {e}")
             return LLMResponse(
                 content="",
                 is_valid=False,
-                raw_response={"error": str(e)},
+                raw_response=response,
                 tokens_used=0
             )
     
     def generate_question(
         self,
         prompt: str,
-        max_tokens: int = 200,  # Increased for DeepSeek R1 which includes thinking
+        max_tokens: int = 150,
     ) -> Tuple[str, bool]:
         """
-        Generate an interview question with full cleaning.
-        
-        Returns:
-            Tuple of (cleaned_question, is_valid)
+        Generate an interview question.
         """
-        logger.info("Generating question via LLM...")
+        logger.info("Generating question via OpenRouter...")
+        
         response = self.generate(
             prompt=prompt,
             max_tokens=max_tokens,
             temperature=0.7,
-            stop_sequences=["Candidate:", "They said:", "Answer:", "Q:", "A:"]
         )
         
         if not response.is_valid:
-            logger.warning(f"LLM response invalid: {response.raw_response}")
+            logger.warning(f"OpenRouter response invalid: {response.raw_response}")
             return "", False
         
-        logger.info(f"Raw LLM response: {response.content[:200]}...")
-        cleaned, is_valid = ResponseCleaner.clean_interviewer_response(response.content)
-        logger.info(f"Cleaned response (valid={is_valid}): {cleaned[:100] if cleaned else 'EMPTY'}")
+        # Clean the response
+        cleaned = response.content.strip()
         
-        return cleaned, is_valid
+        # Remove any quotes wrapping the response
+        if cleaned.startswith('"') and cleaned.endswith('"'):
+            cleaned = cleaned[1:-1]
+        
+        logger.info(f"OpenRouter response: {cleaned[:100]}...")
+        
+        return cleaned, bool(cleaned)
     
     def generate_json(
         self,
@@ -156,57 +145,51 @@ class LLMClient:
         max_tokens: int = 400,
         temperature: float = 0.3,
     ) -> Tuple[Optional[Dict], bool]:
-        """
-        Generate JSON response from LLM.
-        
-        Returns:
-            Tuple of (parsed_json, is_valid)
-        """
+        """Generate JSON response."""
         response = self.generate(
             prompt=prompt,
             max_tokens=max_tokens,
             temperature=temperature,
-            stop_sequences=["\n\n\n"],
         )
         
         if not response.is_valid:
             return None, False
         
-        # Clean and extract JSON
-        cleaned = ResponseCleaner.clean_json_response(response.content)
+        content = response.content
         
-        try:
-            parsed = json.loads(cleaned)
-            return parsed, True
-        except json.JSONDecodeError:
-            # Try to fix common issues
+        # Try to find JSON in the response
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
+        if json_match:
             try:
-                # Fix trailing commas
-                fixed = cleaned.replace(",}", "}").replace(",]", "]")
-                parsed = json.loads(fixed)
-                return parsed, True
+                return json.loads(json_match.group()), True
             except json.JSONDecodeError:
-                return None, False
+                pass
+        
+        # Try parsing the whole content
+        try:
+            return json.loads(content), True
+        except json.JSONDecodeError:
+            return None, False
     
     def generate_analysis(
         self,
         prompt: str,
         max_tokens: int = 500,
     ) -> Tuple[Optional[Dict], bool]:
-        """
-        Generate analysis response (JSON expected).
-        Uses lower temperature for more consistent output.
-        """
+        """Generate analysis response (JSON expected)."""
         return self.generate_json(prompt, max_tokens, temperature=0.3)
     
     def health_check(self) -> bool:
-        """Check if LLM server is responding."""
+        """Check if API is responding."""
         try:
-            response = self.generate("Hello", max_tokens=5)
+            response = self.generate("Say hello", max_tokens=10)
             return response.is_valid
         except Exception:
             return False
 
 
 # Global client instance
-llm_client = LLMClient()
+llm_client = GeminiClient()
+
+# Alias for backward compatibility
+LLMClient = GeminiClient

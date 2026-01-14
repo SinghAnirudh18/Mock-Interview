@@ -229,13 +229,18 @@ async def interview_response(file: UploadFile = File(...)):
     return await _process_text_response(session, user_text)
 
 
+class TextResponseRequest(BaseModel):
+    """Request model for text-based responses."""
+    user_text: str
+
+
 @app.post("/text-response")
-async def text_response(user_text: str = Query(..., min_length=1)):
+async def text_response(request: TextResponseRequest):
     """
-    Process text response from candidate (for testing).
+    Process text response from candidate (alternative to voice).
     
     Args:
-        user_text: The candidate's text response
+        request: Contains user_text - the candidate's text response
         
     Returns:
         Analysis and next question
@@ -249,7 +254,14 @@ async def text_response(user_text: str = Query(..., min_length=1)):
             "interview_ended": True
         }
     
-    return await _process_text_response(session, user_text)
+    if not request.user_text or len(request.user_text.strip()) < 2:
+        return {
+            "error": "Please provide a response",
+            "interviewer_message": "I didn't catch that. Could you please try again?",
+            "interview_ended": False
+        }
+    
+    return await _process_text_response(session, request.user_text.strip())
 
 
 async def _process_text_response(

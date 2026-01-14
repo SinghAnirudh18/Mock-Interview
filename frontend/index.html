@@ -472,6 +472,81 @@
         .report-content::-webkit-scrollbar-thumb:hover {
             background: #9ca3af;
         }
+
+        /* Text Input Styles */
+        .text-input-container {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .text-input {
+            flex: 1;
+            padding: 14px 18px;
+            border: 2px solid #e5e7eb;
+            border-radius: 12px;
+            font-size: 15px;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.3s ease;
+        }
+
+        .text-input:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+
+        .text-input:disabled {
+            background: #f3f4f6;
+            cursor: not-allowed;
+        }
+
+        .send-btn {
+            width: 50px;
+            height: 50px;
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .send-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
+        }
+
+        .send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .send-btn.processing {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        }
+
+        .input-divider {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 8px 0;
+            color: #9ca3af;
+            font-size: 12px;
+        }
+
+        .input-divider::before,
+        .input-divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: #e5e7eb;
+        }
     </style>
 </head>
 
@@ -516,6 +591,19 @@
         </div>
 
         <div class="controls" id="controls" style="display: none;">
+            <!-- Text Input Section -->
+            <div class="text-input-container">
+                <input type="text" class="text-input" id="textInput" placeholder="Type your response here..." />
+                <button class="send-btn" id="sendBtn" title="Send">
+                    <span>➤</span>
+                </button>
+            </div>
+
+            <div class="input-divider">
+                <span>or use voice</span>
+            </div>
+
+            <!-- Voice Recording Button -->
             <button class="record-btn" id="recordBtn">
                 <span id="btnIcon">🎙️</span>
                 <span id="btnText">Start Recording</span>
@@ -549,6 +637,65 @@
         const status = document.getElementById("status");
         const jobRoleInput = document.getElementById("jobRoleInput");
         const reportModal = document.getElementById("reportModal");
+        const textInput = document.getElementById("textInput");
+        const sendBtn = document.getElementById("sendBtn");
+
+        // Send text response function
+        async function sendTextResponse() {
+            const text = textInput.value.trim();
+            if (!text) return;
+
+            // Disable inputs while processing
+            textInput.disabled = true;
+            sendBtn.disabled = true;
+            sendBtn.classList.add("processing");
+            recordBtn.disabled = true;
+            setStatus("Processing your response...");
+
+            try {
+                const res = await fetch("http://localhost:8000/text-response", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ user_text: text })
+                });
+
+                const data = await res.json();
+
+                if (data.error) {
+                    setStatus(data.error);
+                } else {
+                    addMessage(text, "user");
+                    addMessage(data.interviewer_message, "interviewer");
+                    updatePhaseUI(data.phase, data.questions_asked || 1, 17);
+                    textInput.value = "";
+                    setStatus("");
+
+                    if (data.interview_ended) {
+                        endBtn.click(); // Trigger end interview flow
+                    }
+                }
+            } catch (error) {
+                setStatus("Error: " + error.message);
+            }
+
+            // Re-enable inputs
+            textInput.disabled = false;
+            sendBtn.disabled = false;
+            sendBtn.classList.remove("processing");
+            recordBtn.disabled = false;
+            textInput.focus();
+        }
+
+        // Send button click handler
+        sendBtn.onclick = sendTextResponse;
+
+        // Enter key handler for text input
+        textInput.onkeypress = (e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendTextResponse();
+            }
+        };
 
         // Start Interview
         startBtn.onclick = async () => {

@@ -1,7 +1,9 @@
 """
 Response cleaning utilities for LLM outputs.
-Handles DeepSeek chain-of-thought removal, meta-commentary stripping,
-and validation of interviewer responses.
+Handles DeepSeek R1 chain-of-thought removal with AGGRESSIVE cleaning.
+
+This module is specifically tuned for DeepSeek-R1-Distill models that 
+include extensive <think> reasoning blocks before actual responses.
 """
 import re
 from typing import Optional, Tuple
@@ -9,10 +11,8 @@ from typing import Optional, Tuple
 
 class ResponseCleaner:
     """
-    Cleans LLM responses to remove unwanted content like:
-    - Chain-of-thought tags (<think>, <thought>)
-    - Meta-commentary and stage directions
-    - Advice-giving patterns (when interviewer should only ask)
+    Aggressively cleans LLM responses to remove ALL reasoning content.
+    Designed for DeepSeek R1 models with visible chain-of-thought.
     """
     
     # Patterns that indicate AI is giving advice instead of asking questions
@@ -20,135 +20,168 @@ class ResponseCleaner:
         "you should", "i recommend", "it's important to", "the best time",
         "generally speaking", "in my experience", "typically",
         "it depends on", "you'll want to", "you need to",
-        "here's what", "let me explain", "the answer is",
-        "you can", "i suggest", "my advice", "i think you should"
-    ]
-    
-    # Thinking patterns to remove
-    THINKING_PATTERNS = [
-        r'<think>.*?</think>',
-        r'<thought>.*?</thought>',
-        r'<reasoning>.*?</reasoning>',
-        r'<internal>.*?</internal>',
-        r'\*thinks?\*.*?\*',
-        r'\*internal.*?\*',
-    ]
-    
-    # Meta-commentary patterns to remove
-    META_PATTERNS = [
-        r'^\s*(Wait,|Hmm,|Let me see,|Let me think,|I need to|Looking at|The candidate)',
-        r'\(.*?internal.*?\)',
-        r'\[.*?thinking.*?\]',
-        r'^\s*\*.*?\*\s*$',
+        "here's what", "let me explain", "the answer is"
     ]
     
     @classmethod
-    def clean_thinking_tags(cls, text: str) -> str:
-        """Remove all thinking/reasoning tags from response."""
-        cleaned = text
-        for pattern in cls.THINKING_PATTERNS:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL | re.IGNORECASE)
-        return cleaned.strip()
-    
-    @classmethod
-    def clean_meta_commentary(cls, text: str) -> str:
-        """Remove meta-commentary and stage directions."""
-        cleaned = text
-        for pattern in cls.META_PATTERNS:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
+    def aggressive_clean(cls, text: str) -> str:
+        """
+        AGGRESSIVE cleaning for DeepSeek R1 output.
+        Removes ALL content before actual interviewer speech.
+        """
+        if not text:
+            return ""
         
-        # Remove parenthetical and bracketed comments
+        # Step 1: Remove everything between <think> tags (including partial tags)
+        # Handle various formats: <think>, </think>, <|think|>, etc.
+        cleaned = re.sub(r'</?think[^>]*>.*?(?=</?think|$)', '', text, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Step 2: Remove partial/broken think tags like "hink>" or "<thin" 
+        cleaned = re.sub(r'<?h?t?h?i?n?k?>?', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'</?\s*think\s*>?', '', cleaned, flags=re.IGNORECASE)
+        
+        # Step 3: Remove ALL content before common interview starters
+        # This is the nuclear option - find where actual speech starts
+        interview_starters = [
+            r"(Hello[,!]?\s)",
+            r"(Hi[,!]?\s)",
+            r"(Good\s+(?:morning|afternoon|evening))",
+            r"(Welcome[,!]?\s)",
+            r"(Thank\s+you)",
+            r"(Great[,!]?\s)",
+            r"(That'?s?\s+(?:great|interesting|good))",
+            r"(Could\s+you)",
+            r"(Can\s+you)",
+            r"(Would\s+you)",
+            r"(Tell\s+me)",
+            r"(Please\s+(?:tell|describe|explain))",
+            r"(What\s+(?:is|are|do|did|would|made|brings|drew))",
+            r"(How\s+(?:do|did|would|have))",
+            r"(Why\s+(?:do|did|would|are))",
+            r"(Describe\s)",
+            r"(Explain\s)",
+            r"(Walk\s+me)",
+            r"(Share\s)",
+            r"(I'?m\s+Alex)",
+            r"(Nice\s+to\s+meet)",
+        ]
+        
+        for pattern in interview_starters:
+            match = re.search(pattern, cleaned, re.IGNORECASE)
+            if match:
+                # Keep only from this point forward
+                cleaned = cleaned[match.start():]
+                break
+        
+        # Step 4: Remove remaining internal reasoning phrases
+        reasoning_patterns = [
+            r"^.*?(?:okay|alright|let me|so|now|first|then)\s*[,.]?\s*",
+            r"^.*?(?:I need to|I should|I will|I think|I assume)\s+.*?[.!]\s*",
+            r"^.*?(?:looking at|based on|considering|given that)\s+.*?[.!]\s*",
+            r"^.*?(?:the candidate|they said|they mentioned)\s+.*?[.!]\s*",
+        ]
+        
+        for pattern in reasoning_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        
+        # Step 5: Remove parenthetical and bracketed content
         cleaned = re.sub(r'\([^)]*\)', '', cleaned)
         cleaned = re.sub(r'\[[^\]]*\]', '', cleaned)
+        cleaned = re.sub(r'\*[^*]*\*', '', cleaned)
         
-        return cleaned.strip()
+        # Step 6: Clean up whitespace
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        cleaned = cleaned.strip()
+        
+        return cleaned
     
     @classmethod
-    def is_giving_advice(cls, text: str) -> bool:
-        """Check if the response is giving advice instead of asking a question."""
-        text_lower = text.lower()
-        advice_count = sum(1 for indicator in cls.ANSWER_INDICATORS if indicator in text_lower)
-        
-        # If multiple advice indicators or no question mark, likely giving advice
-        has_question = '?' in text
-        return advice_count >= 2 or (advice_count >= 1 and not has_question)
-    
-    @classmethod
-    def extract_question(cls, text: str) -> Optional[str]:
-        """Extract only the question part from a response."""
-        # Try to find sentences ending with question marks
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        questions = [s.strip() for s in sentences if '?' in s]
-        
-        if questions:
-            # Return the most relevant question (usually the last one)
-            return questions[-1]
+    def extract_first_question(cls, text: str) -> Optional[str]:
+        """Extract the first question from response."""
+        # Find sentences ending with ?
+        matches = re.findall(r'[^.!?]*\?', text)
+        if matches:
+            # Return the first substantial question
+            for match in matches:
+                match = match.strip()
+                if len(match.split()) >= 3:  # At least 3 words
+                    return match
         return None
+    
+    @classmethod
+    def is_valid_interviewer_response(cls, text: str) -> bool:
+        """Check if text looks like valid interviewer speech."""
+        if not text or len(text) < 10:
+            return False
+        
+        # Check for reasoning indicators that shouldn't be in final output
+        bad_indicators = [
+            'hink>', '<think', 'okay,', 'alright,', 'let me', 'i need to',
+            'i should', 'looking at', 'based on', 'the candidate', 'they said',
+            'my reasoning', 'first i', 'then i', 'so i', 'considering'
+        ]
+        
+        text_lower = text.lower()
+        for indicator in bad_indicators:
+            if indicator in text_lower:
+                return False
+        
+        return True
     
     @classmethod
     def clean_interviewer_response(cls, text: str) -> Tuple[str, bool]:
         """
         Full cleaning pipeline for interviewer responses.
+        Uses AGGRESSIVE cleaning for DeepSeek R1 models.
         
         Returns:
             Tuple of (cleaned_text, is_valid)
-            If is_valid is False, fallback question should be used.
         """
         if not text:
             return "", False
         
-        # Step 1: Remove thinking tags
-        cleaned = cls.clean_thinking_tags(text)
+        # Aggressive cleaning
+        cleaned = cls.aggressive_clean(text)
         
-        # Step 2: Remove meta-commentary
-        cleaned = cls.clean_meta_commentary(cleaned)
+        # Validate the result
+        if not cls.is_valid_interviewer_response(cleaned):
+            # Try to extract just a question
+            question = cls.extract_first_question(text)
+            if question:
+                cleaned = cls.aggressive_clean(question)
+            else:
+                return "", False
         
-        # Step 3: Normalize whitespace
-        cleaned = re.sub(r'\s+', ' ', cleaned)
-        cleaned = cleaned.strip()
-        
-        # Step 4: Check if response is valid - be more lenient
-        if not cleaned or len(cleaned) < 5:
+        # Final validation
+        if not cleaned or len(cleaned) < 10:
             return "", False
         
-        # Step 5: Check if AI is giving too much advice (only if very obvious)
-        if cls.is_giving_advice(cleaned):
-            # Try to extract just the question
-            question = cls.extract_question(cleaned)
-            if question and len(question) > 10:
-                cleaned = question
-            # Don't return False here - still use the cleaned content
-        
-        # Step 6: Ensure it's a question-like response
-        # If it doesn't end properly, try to clean it up
-        cleaned = cleaned.rstrip('.')
-        if not cleaned.endswith('?') and not cleaned.endswith('!'):
-            # Only add ? if it seems like a question
-            question_starters = ['what', 'how', 'why', 'can', 'could', 'would', 'tell', 'describe', 'explain', 'when', 'where', 'who', 'do', 'did', 'have', 'are', 'is']
-            if any(cleaned.lower().startswith(starter) for starter in question_starters):
+        # Ensure it ends with proper punctuation
+        if not cleaned.endswith(('?', '!', '.')):
+            question_words = ['what', 'how', 'why', 'can', 'could', 'would', 
+                            'tell', 'describe', 'explain', 'when', 'where', 'who']
+            if any(cleaned.lower().startswith(w) for w in question_words):
                 cleaned += '?'
+            else:
+                cleaned += '.'
         
         return cleaned, True
     
     @classmethod
     def clean_json_response(cls, text: str) -> str:
         """Clean response and extract JSON content."""
-        # Remove thinking tags first
-        cleaned = cls.clean_thinking_tags(text)
+        # Remove ALL content before the first {
+        cleaned = re.sub(r'^.*?(?=\{)', '', text, flags=re.DOTALL)
         
         # Find JSON object
         json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', cleaned, re.DOTALL)
         if json_match:
             return json_match.group()
         
-        # Try to find JSON array
-        array_match = re.search(r'\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]', cleaned, re.DOTALL)
-        if array_match:
-            return array_match.group()
-        
-        return cleaned
+        return "{}"
     
     @classmethod
     def clean_analysis_response(cls, text: str) -> str:
-        """Clean response for analysis outputs (JSON expected)."""
+        """Clean response for analysis outputs."""
         return cls.clean_json_response(text)
