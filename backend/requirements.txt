@@ -1,0 +1,18 @@
+# FastAPI Backend Dependencies
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+
+# Speech-to-Text
+faster-whisper>=0.9.0
+
+# Vector Database & Embeddings
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+
+# HTTP & Data
+requests>=2.31.0
+pydantic>=2.0.0
+
+# CUDA support for faster-whisper (already installed via faster-whisper)
+# ctranslate2
